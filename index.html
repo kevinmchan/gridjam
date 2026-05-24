@@ -188,7 +188,7 @@
     const [err, setErr] = useState('');
 
     // create form
-    const [names, setNames] = useState({ 1: 'Player 1', 2: 'Player 2' });
+    const [names, setNames] = useState({ 1: '', 2: 'Player 2' });
     const [mins, setMins] = useState({ 1: 5, 2: 5 });
     const [target, setTarget] = useState(20);
     // join form
@@ -272,7 +272,7 @@
         status: 'lobby',
         createdAt: ServerValue.TIMESTAMP,
         config: { target, mins: { 1: mins[1], 2: mins[2] } },
-        names: { 1: names[1] || 'Player 1', 2: names[2] || 'Player 2' },
+        names: { 1: names[1].trim() || 'Player 1', 2: 'Player 2' },
         players: { 1: clientId.current },
         grid: gridToStr(emptyGrid()),
         pool: makePool(),
@@ -327,7 +327,7 @@
           status: 'playing',
           'clock/turnStartedAt': ServerValue.TIMESTAMP,
         };
-        if (joinName.trim()) upd['names/2'] = joinName.trim();
+        upd['names/2'] = joinName.trim() || 'Player 2';
         ref.update(upd).then(finish);
       });
     }
@@ -481,6 +481,14 @@
       return (
         <Shell>
           <Title sub="create a game" />
+          <div style={{ ...card, padding: 14, marginBottom: 12 }}>
+            <label style={fieldLabel}>YOUR NAME</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ width: 20, height: 20, borderRadius: 6, background: THEME[1].solid, flexShrink: 0 }} />
+              <input value={names[1]} onChange={(e) => setNames({ ...names, 1: e.target.value })}
+                placeholder="Your name" style={nameInput} />
+            </div>
+          </div>
           <div style={{ ...card, padding: 14, marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <span style={{ fontSize: 13, fontWeight: 800, opacity: 0.78, letterSpacing: '0.04em' }}>RACE TO</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -488,24 +496,24 @@
               <span style={{ fontSize: 13, fontWeight: 700, width: 40, opacity: 0.75 }}>points</span>
             </div>
           </div>
-          {[1, 2].map((p) => (
-            <div key={p} style={{ ...card, padding: 14, marginBottom: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                <span style={{ width: 20, height: 20, borderRadius: 6, background: THEME[p].solid, flexShrink: 0 }} />
-                <input value={names[p]} onChange={(e) => setNames({ ...names, [p]: e.target.value })}
-                  style={nameInput} />
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 13, fontWeight: 700, opacity: 0.75 }}>CLOCK</span>
+          <div style={{ ...card, padding: 14, marginBottom: 12 }}>
+            <label style={{ ...fieldLabel, marginBottom: 12 }}>CHESS CLOCKS</label>
+            {[1, 2].map((p) => (
+              <div key={p} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: p === 2 ? 12 : 0 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, opacity: 0.8 }}>
+                  <span style={{ width: 14, height: 14, borderRadius: 4, background: THEME[p].solid }} />
+                  {p === 1 ? 'You' : 'Opponent'}
+                </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Stepper value={mins[p]} onChange={(v) => setMins({ ...mins, [p]: Math.min(15, Math.max(1, v)) })} />
                   <span style={{ fontSize: 13, fontWeight: 700, width: 40, opacity: 0.75 }}>min</span>
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
           <div style={{ fontSize: 12, opacity: 0.62, textAlign: 'center', margin: '4px 0 14px', lineHeight: 1.5 }}>
-            You'll play as <strong>{names[1] || 'Player 1'}</strong> ({THEME[1].name}). Your opponent joins as Player 2.
+            You're <strong>{names[1].trim() || 'Player 1'}</strong> ({THEME[1].name}). Give the less-experienced player
+            a longer clock — an honest handicap everyone can see. Your opponent enters their own name when they join.
           </div>
           <button onClick={createGame} style={primaryBtn(true)}>Create &amp; get a code</button>
           <button onClick={() => setView('home')} style={{ ...ghostBtn, width: '100%', marginTop: 8 }}>Back</button>
