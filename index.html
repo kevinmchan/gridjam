@@ -116,6 +116,15 @@
     const rs = new Set(rows), cs = new Set(cols);
     return grid.map((row, r) => row.map((v, c) => (rs.has(r) || cs.has(c) ? null : v)));
   }
+  // Cells a bomb clears: a 5x5 block centered on (r,c), clipped to the board.
+  const BOMB_RADIUS = 2;
+  function bombRegion(r, c) {
+    const cells = [];
+    for (let rr = r - BOMB_RADIUS; rr <= r + BOMB_RADIUS; rr++)
+      for (let cc = c - BOMB_RADIUS; cc <= c + BOMB_RADIUS; cc++)
+        if (rr >= 0 && rr < SIZE && cc >= 0 && cc < SIZE) cells.push([rr, cc]);
+    return cells;
+  }
   function shapeBounds(shape) {
     let mr = 0, mc = 0;
     for (const [r, c] of shape) { mr = Math.max(mr, r); mc = Math.max(mc, c); }
@@ -206,6 +215,19 @@
         [523.25, 659.25, 783.99, 1046.5].forEach((f, i) =>
           tone(f, 0.32, 'triangle', 0.20, i * 0.12));
       },
+      // Deep boom plus a little sparkle when a bomb detonates.
+      bomb() {
+        if (muted) return;
+        tone(90, 0.30, 'sawtooth', 0.24, 0, 38);
+        tone(150, 0.22, 'square', 0.10, 0.02, 60);
+        [880, 1100, 1320].forEach((f, i) => tone(f, 0.12, 'triangle', 0.07, 0.07 + i * 0.04));
+      },
+      // Two-note "denied" sting when you get blocked and handed a bomb.
+      block() {
+        if (muted) return;
+        tone(392, 0.10, 'square', 0.12, 0);
+        tone(261.63, 0.16, 'square', 0.12, 0.09);
+      },
     };
   })();
 
@@ -276,6 +298,7 @@
     const [names, setNames] = useState({ 1: '', 2: 'Player 2' });
     const [mins, setMins] = useState({ 1: 5, 2: 5 });
     const [target, setTarget] = useState(20);
+    const [mode, setMode] = useState('classic');   // 'classic' | 'bombs'
     // join form
     const [joinCode, setJoinCode] = useState(urlCode);
     const [linkCopied, setLinkCopied] = useState(false);
@@ -337,6 +360,15 @@
     const gameOver = room && room.gameOver;
     const myTurn = !!room && status === 'playing' && !gameOver && turn === (me && me.player);
 
+    // mode 2 ("bombs") extras
+    const gameMode = (room && room.config && room.config.mode) || 'classic';
+    const bombsMode = gameMode === 'bombs';
+    const soloPlayer = (room && room.solo) || null;   // set during a solo comeback run
+    const bombsCount = (room && room.bombs) || { 1: 0, 2: 0 };
+    const myBombs = me ? (bombsCount[me.player] || 0) : 0;
+    // jammed = it's my turn, bombs mode, and no shared piece can be placed
+    const noSharedMove = bombsMode && myTurn && !anyMove(grid, pool);
+
     const displayRemaining = (p) => {
       const clock = (room && room.clock) || {};
       const base = (clock.remaining && clock.remaining[p]) || 0;
@@ -350,16 +382,42 @@
     useEffect(() => {
       if (!room || status !== 'playing' || gameOver) return;
       const t = setInterval(() => {
-        if (displayRemaining(turn) <= 0) {
-          const other = turn === 1 ? 2 : 1;
-          db.ref('games/' + me.roomCode).update({
-            status: 'over',
-            gameOver: { winner: other, reason: 'time', scores: room.scores },
-          });
+        if (displayRemaining(turn) > 0) return;
+        const other = turn === 1 ? 2 : 1;
+        const ref = db.ref('games/' + me.roomCode);
+
+        if (!bombsMode) {                       // classic: opponent wins on time
+          ref.update({ status: 'over', gameOver: { winner: other, reason: 'time', scores: room.scores } });
+          return;
+        }
+
+        if (soloPlayer) {                       // already a solo run; the soloist timed out
+          const leader = soloPlayer === 1 ? 2 : 1;
+          ref.update({ status: 'over', gameOver: { winner: leader, reason: 'time', scores: room.scores } });
+          return;
+        }
+
+        // first timeout in bombs mode: `turn` is the player who ran out
+        if (room.scores[turn] < room.scores[other]) {
+          ref.update({ status: 'over', gameOver: { winner: other, reason: 'time', scores: room.scores } });
+        } else {
+          // they're ahead (or tied) — opponent gets a solo run to overtake
+          const otherBombs = (room.bombs && room.bombs[other]) || 0;
+          const canContinue = anyMove(grid, pool) || otherBombs > 0;
+          if (!canContinue) {
+            ref.update({ status: 'over', gameOver: { winner: turn, reason: 'stuck', scores: room.scores } });
+          } else {
+            ref.update({
+              solo: other,
+              turn: other,
+              ['clock/remaining/' + turn]: 0,
+              ['clock/turnStartedAt']: ServerValue.TIMESTAMP,
+            });
+          }
         }
       }, 250);
       return () => clearInterval(t);
-    }, [room && status, turn, room && room.clock && room.clock.turnStartedAt, gameOver]);
+    }, [room && status, turn, room && room.clock && room.clock.turnStartedAt, gameOver, bombsMode, soloPlayer]);
 
     /* ---- move feedback: sound + line-clear flash ----
        Both clients see each move land via the lastMove write, so feedback
@@ -375,13 +433,23 @@
 
       const cleared = lastMove.cleared || { rows: [], cols: [] };
       const lineCount = (cleared.rows ? cleared.rows.length : 0) + (cleared.cols ? cleared.cols.length : 0);
-      Sound.place();
-      if (lineCount > 0) {
-        Sound.clear(lineCount);
-        setFlash({ rows: cleared.rows || [], cols: cleared.cols || [], player: lastMove.player, key: lastMove.key });
+      const armFlash = (f) => {
+        setFlash(f);
         if (flashTimer.current) clearTimeout(flashTimer.current);
-        flashTimer.current = setTimeout(() => setFlash(null), 520);
+        flashTimer.current = setTimeout(() => setFlash(null), 560);
+      };
+
+      if (lastMove.bomb) {
+        Sound.bomb();
+        armFlash({ cells: lastMove.cells || [], player: lastMove.player, key: lastMove.key, bomb: true });
+      } else {
+        Sound.place();
+        if (lineCount > 0) {
+          Sound.clear(lineCount);
+          armFlash({ rows: cleared.rows || [], cols: cleared.cols || [], player: lastMove.player, key: lastMove.key });
+        }
       }
+      if (lastMove.blocked) Sound.block();
     }, [lastMove && lastMove.key]);
 
     // victory flourish, once per game-over
@@ -397,13 +465,15 @@
       return {
         status: 'lobby',
         createdAt: ServerValue.TIMESTAMP,
-        config: { target, mins: { 1: mins[1], 2: mins[2] } },
+        config: { target, mins: { 1: mins[1], 2: mins[2] }, mode },
         names: { 1: names[1].trim() || 'Player 1', 2: 'Player 2' },
         players: { 1: clientId.current },
         grid: gridToStr(emptyGrid()),
         pool: makePool(),
         turn: 1,
         scores: { 1: 0, 2: 0 },
+        bombs: { 1: 0, 2: 0 },
+        solo: null,
         stats: { lines: { 1: 0, 2: 0 }, turns: 0 },
         clock: { remaining: { 1: mins[1] * 60000, 2: mins[2] * 60000 }, turnStartedAt: null },
         lastMove: null,
@@ -497,6 +567,8 @@
         pool: makePool(),
         turn: 1,
         scores: { 1: 0, 2: 0 },
+        bombs: { 1: 0, 2: 0 },
+        solo: null,
         stats: { lines: { 1: 0, 2: 0 }, turns: 0 },
         clock: { remaining: { 1: cfg.mins[1] * 60000, 2: cfg.mins[2] * 60000 }, turnStartedAt: ServerValue.TIMESTAMP },
         lastMove: null,
@@ -525,6 +597,16 @@
         anchor: pointerToAnchor(entry.shape, e.clientX, e.clientY, e.pointerType || 'mouse'),
       });
     }
+    function startBombDrag(e) {
+      if (!myTurn || myBombs <= 0) return;
+      Sound.unlock();
+      e.preventDefault();
+      const shape = [[0, 0]];
+      setDrag({
+        id: 'bomb', isBomb: true, shape, pointerType: e.pointerType || 'mouse',
+        anchor: pointerToAnchor(shape, e.clientX, e.clientY, e.pointerType || 'mouse'),
+      });
+    }
     useEffect(() => {
       if (drag === null) return;
       const move = (e) => {
@@ -536,7 +618,7 @@
       const up = () => {
         const d = dragRef.current;
         setDrag(null);
-        if (d && d.anchor && attemptRef.current) attemptRef.current(d.id, d.shape, d.anchor);
+        if (d && d.anchor && attemptRef.current) attemptRef.current(d.id, d.shape, d.anchor, d.isBomb);
       };
       window.addEventListener('pointermove', move, { passive: false });
       window.addEventListener('pointerup', up);
@@ -548,83 +630,151 @@
       };
     }, [drag === null]);
 
-    function attemptPlace(id, shape, anchor) {
+    function attemptPlace(id, shape, anchor, isBomb) {
       if (!myTurn) return;
-      const entry = pool.find((e) => e.id === id);
-      if (!entry || entry.used) return;
-      if (!canPlace(grid, shape, anchor.r, anchor.c)) { Sound.invalid(); return; }
+      const meP = me.player, other = meP === 1 ? 2 : 1;
 
-      const ng = grid.map((row) => row.slice());
-      for (const [dr, dc] of shape) ng[anchor.r + dr][anchor.c + dc] = me.player;
-      let poolAfter = (room.pool || []).map((e) => (e.id === id ? { ...e, used: true } : e));
-      const { rows, cols } = fullLines(ng);
-      const lineCount = rows.length + cols.length;
+      // ----- apply the move to the board -----
+      let boardAfter, nextPool, lineCount, clearedRows = [], clearedCols = [], clearedCells = [];
+      if (isBomb) {
+        if (myBombs <= 0) return;
+        if (anchor.r < 0 || anchor.r >= SIZE || anchor.c < 0 || anchor.c >= SIZE) { Sound.invalid(); return; }
+        const region = bombRegion(anchor.r, anchor.c);
+        const ng = grid.map((row) => row.slice());
+        for (const [rr, cc] of region) ng[rr][cc] = null;     // bomb clears its 5x5
+        boardAfter = ng;
+        nextPool = room.pool;                                 // bombs don't touch the shared pool
+        lineCount = 1;                                        // "counts as clearing a line"
+        clearedCells = region;
+      } else {
+        const entry = pool.find((e) => e.id === id);
+        if (!entry || entry.used) return;
+        if (!canPlace(grid, shape, anchor.r, anchor.c)) { Sound.invalid(); return; }
+        const ng = grid.map((row) => row.slice());
+        for (const [dr, dc] of shape) ng[anchor.r + dr][anchor.c + dc] = meP;
+        const poolAfter = (room.pool || []).map((e) => (e.id === id ? { ...e, used: true } : e));
+        const fl = fullLines(ng);
+        clearedRows = fl.rows; clearedCols = fl.cols;
+        lineCount = clearedRows.length + clearedCols.length;
+        boardAfter = lineCount > 0 ? applyCleared(ng, clearedRows, clearedCols) : ng;
+        nextPool = poolAfter.every((e) => e.used) ? makePool() : poolAfter;
+      }
+
       const pts = lineCount > 0 ? scoreFor(lineCount) : 0;
-      const nextScores = { ...room.scores, [me.player]: room.scores[me.player] + pts };
-      const boardAfter = lineCount > 0 ? applyCleared(ng, rows, cols) : ng;
-      let nextPool = poolAfter;
-      if (poolAfter.every((e) => e.used)) nextPool = makePool();
+      const nextScores = { ...room.scores, [meP]: room.scores[meP] + pts };
+
+      const curBombs = room.bombs || { 1: 0, 2: 0 };
+      const nextBombs = { 1: curBombs[1] || 0, 2: curBombs[2] || 0 };
+      if (isBomb) nextBombs[meP] = Math.max(0, nextBombs[meP] - 1);
 
       const st = room.stats || { lines: { 1: 0, 2: 0 }, turns: 0 };
       const nextStats = {
-        lines: { ...st.lines, [me.player]: (st.lines[me.player] || 0) + lineCount },
+        lines: { ...st.lines, [meP]: (st.lines[meP] || 0) + lineCount },
         turns: (st.turns || 0) + 1,
       };
 
       const clock = room.clock || {};
       const elapsed = clock.turnStartedAt ? Math.max(0, serverNow() - clock.turnStartedAt) : 0;
-      const remainAfter = Math.max(0, ((clock.remaining && clock.remaining[me.player]) || 0) - elapsed);
+      const remainAfter = Math.max(0, ((clock.remaining && clock.remaining[meP]) || 0) - elapsed);
 
-      const other = me.player === 1 ? 2 : 1;
       const cl = comboLabel(lineCount);
-      // lastMove is written for EVERY move (scoring or not) so both clients
-      // can trigger the placement sound; the extra fields drive the
-      // line-clear flash and score popup.
+      const labelText = pts > 0 ? ('+' + pts + (isBomb ? ' 💥' : (cl ? '  ' + cl : ''))) : '';
       const upd = {
         grid: gridToStr(boardAfter),
         pool: nextPool,
         scores: nextScores,
         stats: nextStats,
+        bombs: nextBombs,
         lastMove: {
-          player: me.player,
-          key: Date.now(),
-          text: pts > 0 ? '+' + pts + (cl ? '  ' + cl : '') : '',
-          pts: pts,
-          cleared: { rows: rows, cols: cols },
+          player: meP, key: Date.now(), text: labelText, pts,
+          cleared: { rows: clearedRows, cols: clearedCols },
+          cells: clearedCells, bomb: !!isBomb, blocked: null,
         },
-        ['clock/remaining/' + me.player]: remainAfter,
+        ['clock/remaining/' + meP]: remainAfter,
       };
+      const startTurn = (p) => { upd.turn = p; upd['clock/turnStartedAt'] = ServerValue.TIMESTAMP; };
+      const finish = () => db.ref('games/' + me.roomCode).update(upd);
+      const reachedTarget = nextScores[meP] >= room.config.target;
 
-      if (nextScores[me.player] >= room.config.target) {
-        upd.status = 'over';
-        upd.gameOver = { winner: me.player, reason: 'target', scores: nextScores };
-      } else if (!anyMove(boardAfter, withShapes(nextPool))) {
-        upd.status = 'over';
-        upd.gameOver = { winner: me.player, reason: 'nomove', scores: nextScores };
-      } else {
-        upd.turn = other;
-        upd['clock/turnStartedAt'] = ServerValue.TIMESTAMP;
+      // ----- SOLO comeback run: only this player is still on the clock -----
+      if (soloPlayer) {
+        const leader = soloPlayer === 1 ? 2 : 1;
+        if (reachedTarget || nextScores[meP] > nextScores[leader]) {
+          upd.status = 'over';
+          upd.gameOver = { winner: meP, reason: reachedTarget ? 'target' : 'comeback', scores: nextScores };
+        } else if (!anyMove(boardAfter, withShapes(nextPool)) && nextBombs[meP] <= 0) {
+          upd.status = 'over';
+          upd.gameOver = { winner: leader, reason: 'stuck', scores: nextScores };
+        } else {
+          startTurn(meP);                       // keep going solo
+        }
+        finish();
+        return;
       }
-      db.ref('games/' + me.roomCode).update(upd);
+
+      // ----- target wins instantly (both modes) -----
+      if (reachedTarget) {
+        upd.status = 'over';
+        upd.gameOver = { winner: meP, reason: 'target', scores: nextScores };
+        finish();
+        return;
+      }
+
+      const opponentCanShared = anyMove(boardAfter, withShapes(nextPool));
+
+      if (!bombsMode) {
+        // CLASSIC: blocking the opponent ends the game
+        if (!opponentCanShared) {
+          upd.status = 'over';
+          upd.gameOver = { winner: meP, reason: 'nomove', scores: nextScores };
+        } else {
+          startTurn(other);
+        }
+        finish();
+        return;
+      }
+
+      // ----- BOMBS MODE turn resolution -----
+      if (opponentCanShared) {
+        startTurn(other);
+      } else {
+        // Board is jammed → "block". Opponent skips their turn and banks a bomb;
+        // the blocker plays again but must immediately detonate a bomb to reopen
+        // the board, so we make sure they hold at least one.
+        nextBombs[other] = (nextBombs[other] || 0) + 1;
+        if (nextBombs[meP] <= 0) nextBombs[meP] = 1;
+        upd.bombs = nextBombs;
+        upd.lastMove.blocked = other;
+        startTurn(meP);
+      }
+      finish();
     }
     attemptRef.current = attemptPlace;
 
     /* ---- drop preview ---- */
     const dAnchor = drag && drag.anchor;
-    const previewValid = drag && dAnchor ? canPlace(grid, drag.shape, dAnchor.r, dAnchor.c) : false;
+    const previewBomb = !!(drag && drag.isBomb);
+    let previewValid = false;
     const previewMap = {};
     if (drag && dAnchor) {
-      for (const [dr, dc] of drag.shape) {
-        const r = dAnchor.r + dr, c = dAnchor.c + dc;
-        if (r >= 0 && r < SIZE && c >= 0 && c < SIZE) previewMap[`${r},${c}`] = true;
+      if (previewBomb) {
+        previewValid = dAnchor.r >= 0 && dAnchor.r < SIZE && dAnchor.c >= 0 && dAnchor.c < SIZE;
+        if (previewValid) for (const [r, c] of bombRegion(dAnchor.r, dAnchor.c)) previewMap[`${r},${c}`] = true;
+      } else {
+        previewValid = canPlace(grid, drag.shape, dAnchor.r, dAnchor.c);
+        for (const [dr, dc] of drag.shape) {
+          const r = dAnchor.r + dr, c = dAnchor.c + dc;
+          if (r >= 0 && r < SIZE && c >= 0 && c < SIZE) previewMap[`${r},${c}`] = true;
+        }
       }
     }
 
-    // cells belonging to a just-cleared line, for the flash overlay
+    // cells belonging to a just-cleared line (or bomb blast), for the flash overlay
     const flashMap = {};
     if (flash) {
-      for (const r of flash.rows) for (let c = 0; c < SIZE; c++) flashMap[`${r},${c}`] = true;
-      for (const c of flash.cols) for (let r = 0; r < SIZE; r++) flashMap[`${r},${c}`] = true;
+      for (const r of (flash.rows || [])) for (let c = 0; c < SIZE; c++) flashMap[`${r},${c}`] = true;
+      for (const c of (flash.cols || [])) for (let r = 0; r < SIZE; r++) flashMap[`${r},${c}`] = true;
+      for (const [r, c] of (flash.cells || [])) flashMap[`${r},${c}`] = true;
     }
 
     /* ===================== render ===================== */
@@ -657,6 +807,28 @@
               <span style={{ width: 20, height: 20, borderRadius: 6, background: THEME[1].solid, flexShrink: 0 }} />
               <input value={names[1]} onChange={(e) => setNames({ ...names, 1: e.target.value })}
                 placeholder="Your name" style={nameInput} />
+            </div>
+          </div>
+          <div style={{ ...card, padding: 14, marginBottom: 12 }}>
+            <label style={{ ...fieldLabel, marginBottom: 10 }}>GAME MODE</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {[['classic', 'Classic'], ['bombs', 'Bombs']].map(([m, label]) => {
+                const on = mode === m;
+                return (
+                  <button key={m} onClick={() => setMode(m)} style={{
+                    flex: 1, padding: '10px', borderRadius: 11, cursor: 'pointer', fontFamily: "'Fraunces', serif",
+                    fontSize: 15, fontWeight: 700, transition: 'all .15s ease',
+                    border: on ? `2px solid ${THEME[1].flat}` : '1px solid #d8c49a',
+                    background: on ? THEME[1].soft : 'transparent', color: on ? '#7a2e16' : '#6b5b3c' }}>
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.65, marginTop: 9, lineHeight: 1.5 }}>
+              {mode === 'classic'
+                ? 'Take turns placing shared blocks. Block your opponent — leave them no move — and you win instantly.'
+                : "Blocking no longer ends the game: it hands your opponent a 💣 and skips their turn. A bomb blasts a 5×5 hole. When a clock runs out, the leader wins — unless the player behind is the one with time left, who can keep playing solo to catch up."}
             </div>
           </div>
           <div style={{ ...card, padding: 14, marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -806,13 +978,18 @@
     // status === 'playing' or 'over'
     const meName = room.names[me.player];
     const low = (p) => displayRemaining(p) <= 30000;
-    const bannerText = gameOver
-      ? 'Game over'
-      : !myTurn
-        ? `Waiting for ${room.names[turn]}…`
-        : drag
-          ? (previewValid ? 'Release to drop ✓' : 'No room there — keep moving')
-          : 'Your turn — drag a block';
+    const soloOpp = soloPlayer ? (soloPlayer === 1 ? 2 : 1) : null;
+    const iAmOut = !!soloPlayer && me.player !== soloPlayer;   // I timed out; watching the chase
+    let bannerText;
+    if (gameOver) bannerText = 'Game over';
+    else if (iAmOut) bannerText = `Out of time — ${room.names[soloPlayer]} is chasing your ${room.scores[me.player]} pts`;
+    else if (!myTurn) bannerText = soloPlayer ? `${room.names[soloPlayer]} is racing to catch up…` : `Waiting for ${room.names[turn]}…`;
+    else if (drag) bannerText = previewValid
+      ? (previewBomb ? 'Release to detonate 💥' : 'Release to drop ✓')
+      : (previewBomb ? 'Off the board — keep moving' : 'No room there — keep moving');
+    else if (noSharedMove) bannerText = '🚫 Jammed — drag your 💣 to blast it open';
+    else if (soloPlayer) bannerText = `Solo run — pass ${room.scores[soloOpp]} pts before time runs out!`;
+    else bannerText = 'Your turn — drag a block' + (bombsMode && myBombs > 0 ? ' or 💣' : '');
 
     return (
       <div style={page}>
@@ -852,15 +1029,26 @@
                       color: THEME[p].flat, animation: 'gl-score 1.15s ease forwards', pointerEvents: 'none',
                     }}>{room.lastMove.text}</div>
                   )}
+                  {bombsMode && room.lastMove && room.lastMove.blocked === p && (
+                    <div key={'blk' + room.lastMove.key} style={{
+                      position: 'absolute', right: 10, top: 30, ...display, fontSize: 15, fontWeight: 700,
+                      color: '#d9531e', animation: 'gl-score 1.3s ease forwards', pointerEvents: 'none',
+                    }}>Blocked +💣</div>
+                  )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                     <span style={{ width: 12, height: 12, borderRadius: 4, background: THEME[p].solid }} />
                     <span style={{ fontSize: 12.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {room.names[p]}{p === me.player ? ' (you)' : ''}
                     </span>
+                    {bombsMode && (bombsCount[p] || 0) > 0 && (
+                      <span style={{ fontSize: 11.5, fontWeight: 800, color: '#d9531e', marginLeft: 'auto' }}>
+                        💣{bombsCount[p]}
+                      </span>
+                    )}
                   </div>
                   <div style={{ ...display, fontSize: 26, fontWeight: 700, lineHeight: 1.15, marginTop: 1,
                     fontVariantNumeric: 'tabular-nums', color: low(p) ? '#c1392b' : '#3a3025' }}>
-                    {timeFmt(displayRemaining(p))}
+                    {soloPlayer && p !== soloPlayer ? 'OUT' : timeFmt(displayRemaining(p))}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 4 }}>
                     <span style={{ ...display, fontSize: 22, fontWeight: 700, color: THEME[p].flat }}>{room.scores[p]}</span>
@@ -876,8 +1064,10 @@
 
           {/* turn banner */}
           <div style={{ ...card, padding: '7px 12px', marginBottom: 12, textAlign: 'center',
-            background: drag && !previewValid ? '#b9462f' : THEME[turn].solid, color: '#fff', border: 'none',
-            transition: 'background .15s ease' }}>
+            background: drag
+              ? (!previewValid ? '#b9462f' : (previewBomb ? '#d9531e' : THEME[turn].solid))
+              : (noSharedMove ? '#d9531e' : THEME[turn].solid),
+            color: '#fff', border: 'none', transition: 'background .15s ease' }}>
             <span style={{ fontSize: 13.5, fontWeight: 800 }}>{bannerText}</span>
           </div>
 
@@ -892,7 +1082,9 @@
                     borderRadius: 6, boxShadow: 'inset 0 2px 4px rgba(120,90,40,0.18)' }}>
                     {flashMap[key] && (
                       <div key={'f' + flash.key} style={{ position: 'absolute', inset: 0, borderRadius: 6,
-                        background: `radial-gradient(circle, #fff 0%, ${THEME[flash.player].flat} 100%)`,
+                        background: flash.bomb
+                          ? 'radial-gradient(circle, #fff 0%, #f08a1d 55%, #d9531e 100%)'
+                          : `radial-gradient(circle, #fff 0%, ${THEME[flash.player].flat} 100%)`,
                         animation: 'gl-flash .5s ease forwards', pointerEvents: 'none', zIndex: 2 }} />
                     )}
                     {val && (
@@ -900,11 +1092,15 @@
                         boxShadow: '0 2px 0 rgba(0,0,0,0.16), inset 0 2px 1px rgba(255,255,255,0.4)',
                         animation: 'gl-pop .22s ease' }} />
                     )}
-                    {isPreview && previewValid && (
+                    {isPreview && previewBomb && previewValid && (
+                      <div style={{ position: 'absolute', inset: 0, borderRadius: 6, boxSizing: 'border-box',
+                        background: 'rgba(240,138,29,0.4)', border: '2px dashed #d9531e' }} />
+                    )}
+                    {isPreview && !previewBomb && previewValid && (
                       <div style={{ position: 'absolute', inset: 0, borderRadius: 6, boxSizing: 'border-box',
                         background: THEME[me.player].soft, border: `2px dashed ${THEME[me.player].flat}` }} />
                     )}
-                    {isPreview && !previewValid && (
+                    {isPreview && !previewBomb && !previewValid && (
                       <div style={{ position: 'absolute', inset: 0, borderRadius: 6, boxSizing: 'border-box',
                         border: '2.5px dashed #a01a14',
                         background: 'repeating-linear-gradient(45deg,rgba(180,30,22,0.96) 0 7px,rgba(180,30,22,0.32) 7px 14px)' }} />
@@ -941,6 +1137,23 @@
                   </div>
                 );
               })}
+              {bombsMode && (
+                <div key="bomb" onPointerDown={myBombs > 0 ? startBombDrag : undefined} style={{
+                  flex: 1, border: '1px solid #e2cfa3', borderRadius: 12, padding: '12px 6px', position: 'relative',
+                  touchAction: 'none', userSelect: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: myBombs > 0 ? 'radial-gradient(circle at 38% 32%, #5a5048, #2b2620)' : '#ece1c6',
+                  cursor: (myBombs > 0 && myTurn) ? 'grab' : 'default',
+                  opacity: (drag && drag.isBomb) ? 0.35 : (myBombs > 0 ? (myTurn ? 1 : 0.6) : 0.5),
+                  transition: 'opacity .12s ease' }}>
+                  <span style={{ fontSize: 24, opacity: myBombs > 0 ? 1 : 0.4,
+                    filter: myBombs > 0 ? 'none' : 'grayscale(1)' }}>💣</span>
+                  {myBombs > 0 && (
+                    <span style={{ position: 'absolute', top: -6, right: -6, minWidth: 20, height: 20, padding: '0 5px',
+                      borderRadius: 10, background: '#d9531e', color: '#fff', fontSize: 12, fontWeight: 800,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box' }}>{myBombs}</span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -972,6 +1185,8 @@
                 {gameOver.reason === 'target' && `${room.names[gameOver.winner]} hit ${room.config.target} points first.`}
                 {gameOver.reason === 'time' && `${room.names[gameOver.winner === 1 ? 2 : 1]} ran out of time.`}
                 {gameOver.reason === 'nomove' && `${room.names[gameOver.winner === 1 ? 2 : 1]} had no legal move left.`}
+                {gameOver.reason === 'comeback' && `${room.names[gameOver.winner]} overtook the score on a solo run.`}
+                {gameOver.reason === 'stuck' && `${room.names[gameOver.winner === 1 ? 2 : 1]} got stuck with no moves or bombs left.`}
               </div>
               <div style={{ ...display, fontSize: 19, fontWeight: 700, marginBottom: 16, fontVariantNumeric: 'tabular-nums' }}>
                 <span style={{ color: THEME[1].flat }}>{(gameOver.scores || room.scores)[1]}</span>
