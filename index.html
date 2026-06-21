@@ -135,6 +135,80 @@
     2: { name: 'Teal',  solid: 'linear-gradient(158deg,#56b1a6,#2a8378)', flat: '#2f8c80', soft: 'rgba(47,140,128,0.5)' },
   };
 
+  /* ===================== sound effects =====================
+     Synthesized with the Web Audio API so there are no asset files to
+     ship and everything works offline. Browsers require a user gesture
+     before audio can start, so unlock() is called from button taps and
+     the first drag; after that, moves arriving over Firebase can play. */
+  const Sound = (function () {
+    let ctx = null;
+    let muted = false;
+    try { muted = localStorage.getItem('gl_muted') === '1'; } catch (e) {}
+
+    function ac() {
+      if (typeof window === 'undefined') return null;
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        try { ctx = new AC(); } catch (e) { return null; }
+      }
+      if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+      return ctx;
+    }
+    // One enveloped oscillator. Optional pitch glide to `slideTo`.
+    function tone(freq, dur, type, gain, delay, slideTo) {
+      const c = ac(); if (!c) return;
+      const t0 = c.currentTime + (delay || 0);
+      const osc = c.createOscillator();
+      const g = c.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(freq, t0);
+      if (slideTo) { try { osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur); } catch (e) {} }
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain || 0.2), t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g); g.connect(c.destination);
+      osc.start(t0); osc.stop(t0 + dur + 0.03);
+    }
+    return {
+      isMuted: () => muted,
+      unlock() { if (!muted) ac(); },
+      toggle() {
+        muted = !muted;
+        try { localStorage.setItem('gl_muted', muted ? '1' : '0'); } catch (e) {}
+        if (!muted) ac();
+        return muted;
+      },
+      // A soft wooden "thock" when a block lands.
+      place() {
+        if (muted) return;
+        tone(200, 0.09, 'triangle', 0.20, 0, 150);
+        tone(360, 0.06, 'sine', 0.08, 0.015);
+      },
+      // Rising arpeggio that grows with the number of lines cleared.
+      clear(lines) {
+        if (muted) return;
+        const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5, 1568.0];
+        const steps = Math.max(2, Math.min(lines + 1, notes.length));
+        for (let i = 0; i < steps; i++) {
+          tone(notes[i], 0.20, 'triangle', 0.16, i * 0.06);
+          tone(notes[i] * 2, 0.16, 'sine', 0.05, i * 0.06);
+        }
+      },
+      // Low buzz when a block is dropped somewhere it can't fit.
+      invalid() {
+        if (muted) return;
+        tone(150, 0.16, 'sawtooth', 0.12, 0, 80);
+      },
+      // Short victory flourish at game over.
+      win() {
+        if (muted) return;
+        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) =>
+          tone(f, 0.32, 'triangle', 0.20, i * 0.12));
+      },
+    };
+  })();
+
   /* ===================== RTDB <-> state encoding ===================== */
   // grid: 8x8 of null|1|2  <->  64-char string ('.'/'1'/'2')
   const gridToStr = (g) => g.map((row) => row.map((v) => (v ? String(v) : '.')).join('')).join('');
@@ -218,6 +292,14 @@
       setDragState(v);
     };
 
+    // sound + line-clear flash feedback
+    const [muted, setMuted] = useState(() => Sound.isMuted());
+    const [flash, setFlash] = useState(null);   // { rows, cols, player, key } | null
+    const lastMoveKey = useRef(null);           // last lastMove.key we reacted to
+    const gameOverPlayed = useRef(false);
+    const flashTimer = useRef(null);
+    const toggleMute = () => { setMuted(Sound.toggle()); };
+
     const serverNow = () => Date.now() + offsetRef.current;
 
     /* ---- subscriptions ---- */
@@ -278,6 +360,37 @@
       return () => clearInterval(t);
     }, [room && status, turn, room && room.clock && room.clock.turnStartedAt, gameOver]);
 
+    /* ---- move feedback: sound + line-clear flash ----
+       Both clients see each move land via the lastMove write, so feedback
+       fires here for whoever made it AND their opponent. We skip the first
+       observed key so reattaching mid-game doesn't replay a stale move. */
+    const lastMove = room && room.lastMove;
+    useEffect(() => {
+      if (!lastMove || !lastMove.key) return;
+      if (lastMove.key === lastMoveKey.current) return;
+      const firstSeen = lastMoveKey.current === null;
+      lastMoveKey.current = lastMove.key;
+      if (firstSeen) return;
+
+      const cleared = lastMove.cleared || { rows: [], cols: [] };
+      const lineCount = (cleared.rows ? cleared.rows.length : 0) + (cleared.cols ? cleared.cols.length : 0);
+      Sound.place();
+      if (lineCount > 0) {
+        Sound.clear(lineCount);
+        setFlash({ rows: cleared.rows || [], cols: cleared.cols || [], player: lastMove.player, key: lastMove.key });
+        if (flashTimer.current) clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlash(null), 520);
+      }
+    }, [lastMove && lastMove.key]);
+
+    // victory flourish, once per game-over
+    useEffect(() => {
+      if (gameOver && !gameOverPlayed.current) { gameOverPlayed.current = true; Sound.win(); }
+      if (!gameOver) gameOverPlayed.current = false;
+    }, [!!gameOver]);
+
+    useEffect(() => () => { if (flashTimer.current) clearTimeout(flashTimer.current); }, []);
+
     /* ---- lobby actions ---- */
     function freshGameRecord() {
       return {
@@ -307,6 +420,7 @@
     }
 
     function createGame() {
+      Sound.unlock();
       setErr('');
       uniqueCode((code) => {
         db.ref('games/' + code).set(freshGameRecord()).then(() => {
@@ -317,6 +431,7 @@
     }
 
     function joinGame() {
+      Sound.unlock();
       setErr('');
       const code = joinCode.trim().toUpperCase();
       if (code.length < 4) { setErr('Enter the 4-character code.'); return; }
@@ -362,6 +477,7 @@
     }
 
     function playAgain() {
+      Sound.unlock();
       const cfg = room.config;
       db.ref('games/' + me.roomCode).update({
         status: 'playing',
@@ -390,6 +506,7 @@
     }
     function startDrag(e, entry) {
       if (!myTurn || entry.used) return;
+      Sound.unlock();
       e.preventDefault();
       setDrag({
         id: entry.id, shape: entry.shape, pointerType: e.pointerType || 'mouse',
@@ -423,7 +540,7 @@
       if (!myTurn) return;
       const entry = pool.find((e) => e.id === id);
       if (!entry || entry.used) return;
-      if (!canPlace(grid, shape, anchor.r, anchor.c)) return;
+      if (!canPlace(grid, shape, anchor.r, anchor.c)) { Sound.invalid(); return; }
 
       const ng = grid.map((row) => row.slice());
       for (const [dr, dc] of shape) ng[anchor.r + dr][anchor.c + dc] = me.player;
@@ -448,12 +565,21 @@
 
       const other = me.player === 1 ? 2 : 1;
       const cl = comboLabel(lineCount);
+      // lastMove is written for EVERY move (scoring or not) so both clients
+      // can trigger the placement sound; the extra fields drive the
+      // line-clear flash and score popup.
       const upd = {
         grid: gridToStr(boardAfter),
         pool: nextPool,
         scores: nextScores,
         stats: nextStats,
-        lastMove: pts > 0 ? { player: me.player, text: '+' + pts + (cl ? '  ' + cl : ''), key: Date.now() } : null,
+        lastMove: {
+          player: me.player,
+          key: Date.now(),
+          text: pts > 0 ? '+' + pts + (cl ? '  ' + cl : '') : '',
+          pts: pts,
+          cleared: { rows: rows, cols: cols },
+        },
         ['clock/remaining/' + me.player]: remainAfter,
       };
 
@@ -480,6 +606,13 @@
         const r = dAnchor.r + dr, c = dAnchor.c + dc;
         if (r >= 0 && r < SIZE && c >= 0 && c < SIZE) previewMap[`${r},${c}`] = true;
       }
+    }
+
+    // cells belonging to a just-cleared line, for the flash overlay
+    const flashMap = {};
+    if (flash) {
+      for (const r of flash.rows) for (let c = 0; c < SIZE; c++) flashMap[`${r},${c}`] = true;
+      for (const c of flash.cols) for (let r = 0; r < SIZE; r++) flashMap[`${r},${c}`] = true;
     }
 
     /* ===================== render ===================== */
@@ -629,8 +762,15 @@
         <div style={{ maxWidth: 460, margin: '0 auto' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
             <span style={{ ...display, fontSize: 22, fontWeight: 700, letterSpacing: '0.04em' }}>GRIDLOCK</span>
-            <span style={{ fontSize: 12, fontWeight: 700, opacity: 0.6 }}>
-              You: <span style={{ color: THEME[me.player].flat }}>{meName}</span> · room {me.roomCode}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, opacity: 0.6 }}>
+                You: <span style={{ color: THEME[me.player].flat }}>{meName}</span> · room {me.roomCode}
+              </span>
+              <button onClick={toggleMute} aria-label={muted ? 'Unmute sound' : 'Mute sound'} title={muted ? 'Unmute' : 'Mute'}
+                style={{ border: '1px solid #d8c49a', background: '#f1e7cf', borderRadius: 9, width: 30, height: 30,
+                  fontSize: 15, lineHeight: 1, cursor: 'pointer', padding: 0, flexShrink: 0 }}>
+                {muted ? '🔇' : '🔊'}
+              </button>
             </span>
           </div>
 
@@ -648,7 +788,7 @@
                   transition: 'all .18s ease',
                   animation: active && low(p) ? 'gl-pulse 1s infinite' : 'none',
                 }}>
-                  {room.lastMove && room.lastMove.player === p && (
+                  {room.lastMove && room.lastMove.player === p && room.lastMove.text && (
                     <div key={room.lastMove.key} style={{
                       position: 'absolute', right: 10, top: 30, ...display, fontSize: 17, fontWeight: 700,
                       color: THEME[p].flat, animation: 'gl-score 1.15s ease forwards', pointerEvents: 'none',
@@ -692,6 +832,11 @@
                 return (
                   <div key={key} style={{ position: 'relative', aspectRatio: '1', background: '#e7dabf',
                     borderRadius: 6, boxShadow: 'inset 0 2px 4px rgba(120,90,40,0.18)' }}>
+                    {flashMap[key] && (
+                      <div key={'f' + flash.key} style={{ position: 'absolute', inset: 0, borderRadius: 6,
+                        background: `radial-gradient(circle, #fff 0%, ${THEME[flash.player].flat} 100%)`,
+                        animation: 'gl-flash .5s ease forwards', pointerEvents: 'none', zIndex: 2 }} />
+                    )}
                     {val && (
                       <div style={{ position: 'absolute', inset: 0, borderRadius: 6, background: THEME[val].solid,
                         boxShadow: '0 2px 0 rgba(0,0,0,0.16), inset 0 2px 1px rgba(255,255,255,0.4)',
@@ -902,6 +1047,7 @@
     @keyframes gl-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(208,72,60,0.55);} 50%{box-shadow:0 0 0 7px rgba(208,72,60,0);} }
     @keyframes gl-rise { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
     @keyframes gl-score { 0%{opacity:0;transform:translateY(6px) scale(0.8);} 20%{opacity:1;transform:translateY(0) scale(1.05);} 75%{opacity:1;} 100%{opacity:0;transform:translateY(-20px) scale(1);} }
+    @keyframes gl-flash { 0%{opacity:0;transform:scale(0.55);} 25%{opacity:0.95;transform:scale(1);} 100%{opacity:0;transform:scale(1.08);} }
     * { -webkit-tap-highlight-color: transparent; }
     code { background:#f1e7cf; padding:1px 5px; border-radius:5px; font-size:0.92em; }
   `;
