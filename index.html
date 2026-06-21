@@ -279,6 +279,7 @@
     // join form
     const [joinCode, setJoinCode] = useState(urlCode);
     const [linkCopied, setLinkCopied] = useState(false);
+    const [codeCopied, setCodeCopied] = useState(false);
     const [joinName, setJoinName] = useState('');
 
     // drag state (mirrored into a ref for window listeners)
@@ -728,8 +729,17 @@
               {me.roomCode}
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-              <button onClick={() => { try { navigator.clipboard.writeText(me.roomCode); } catch (e) {} }}
-                style={{ ...ghostBtn, display: 'inline-block', padding: '7px 16px', flex: 'none' }}>Copy code</button>
+              <button onClick={() => {
+                  try { navigator.clipboard.writeText(me.roomCode); } catch (e) {}
+                  setCodeCopied(true);
+                  setTimeout(() => setCodeCopied(false), 1800);
+                }}
+                style={{ ...ghostBtn, display: 'inline-block', padding: '7px 16px', flex: 'none',
+                  background: codeCopied ? THEME[2].soft : 'transparent',
+                  borderColor: codeCopied ? THEME[2].flat : '#d8c49a',
+                  color: codeCopied ? '#1f6f64' : '#6b5b3c', transition: 'all .15s ease' }}>
+                {codeCopied ? 'Copied ✓' : 'Copy code'}
+              </button>
               <button onClick={() => shareInvite(me.roomCode)}
                 style={{ ...ghostBtn, display: 'inline-block', padding: '7px 16px', flex: 'none' }}>
                 {linkCopied ? 'Link copied ✓' : (navigator.share ? 'Share link' : 'Copy link')}
