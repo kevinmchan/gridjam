@@ -977,8 +977,6 @@
 
     // status === 'playing' or 'over'
     const meName = room.names[me.player];
-    const oppId = me.player === 1 ? 2 : 1;
-    const oppBombs = bombsCount[oppId] || 0;
     const low = (p) => displayRemaining(p) <= 30000;
     const soloOpp = soloPlayer ? (soloPlayer === 1 ? 2 : 1) : null;
     const iAmOut = !!soloPlayer && me.player !== soloPlayer;   // I timed out; watching the chase
@@ -1139,41 +1137,25 @@
                   </div>
                 );
               })}
-            </div>
-          </div>
-
-          {/* personal bombs tray (bombs mode) */}
-          {bombsMode && (
-            <div style={{ ...card, padding: 12, marginBottom: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 9 }}>
-                <span style={{ fontSize: 12, fontWeight: 800, opacity: 0.7, letterSpacing: '0.05em' }}>YOUR BOMBS</span>
-                <span style={{ fontSize: 11.5, fontWeight: 700, opacity: 0.55 }}>{room.names[oppId]}: 💣{oppBombs}</span>
-              </div>
-              {myBombs > 0 ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <div onPointerDown={startBombDrag} style={{
-                    width: 56, height: 56, flexShrink: 0, position: 'relative', borderRadius: 12,
-                    background: previewBomb ? '#f3ead4' : 'radial-gradient(circle at 38% 32%, #5a5048, #2b2620)',
-                    border: '1px solid #e2cfa3', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 26, touchAction: 'none', userSelect: 'none',
-                    cursor: myTurn ? 'grab' : 'default', opacity: previewBomb ? 0.35 : (myTurn ? 1 : 0.5),
-                    transition: 'opacity .12s ease' }}>
-                    💣
+              {bombsMode && (
+                <div key="bomb" onPointerDown={myBombs > 0 ? startBombDrag : undefined} style={{
+                  flex: 1, border: '1px solid #e2cfa3', borderRadius: 12, padding: '12px 6px', position: 'relative',
+                  touchAction: 'none', userSelect: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: myBombs > 0 ? 'radial-gradient(circle at 38% 32%, #5a5048, #2b2620)' : '#ece1c6',
+                  cursor: (myBombs > 0 && myTurn) ? 'grab' : 'default',
+                  opacity: (drag && drag.isBomb) ? 0.35 : (myBombs > 0 ? (myTurn ? 1 : 0.6) : 0.5),
+                  transition: 'opacity .12s ease' }}>
+                  <span style={{ fontSize: 24, opacity: myBombs > 0 ? 1 : 0.4,
+                    filter: myBombs > 0 ? 'none' : 'grayscale(1)' }}>💣</span>
+                  {myBombs > 0 && (
                     <span style={{ position: 'absolute', top: -6, right: -6, minWidth: 20, height: 20, padding: '0 5px',
                       borderRadius: 10, background: '#d9531e', color: '#fff', fontSize: 12, fontWeight: 800,
                       display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box' }}>{myBombs}</span>
-                  </div>
-                  <span style={{ fontSize: 12.5, opacity: 0.7, lineHeight: 1.45 }}>
-                    Drag onto the board to blast a <strong>5×5</strong> hole — counts as a cleared line (+1).
-                  </span>
-                </div>
-              ) : (
-                <div style={{ fontSize: 12.5, opacity: 0.6, lineHeight: 1.45 }}>
-                  No bombs yet. You earn one whenever your opponent jams the board on your turn.
+                  )}
                 </div>
               )}
             </div>
-          )}
+          </div>
 
           <div style={{ ...card, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
             <span style={{ fontWeight: 700, opacity: 0.6 }}>Turn {room.stats ? room.stats.turns : 0}</span>
