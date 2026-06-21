@@ -439,8 +439,9 @@
     const soloPlayer = (room && room.solo) || null;   // set during a solo comeback run
     // jammed = it's my turn, bombs mode, and no shared piece can be placed.
     // A bomb is available exactly when you're jammed — there's no counter to
-    // track, since it must be used immediately to reopen the board.
-    const noSharedMove = bombsMode && myTurn && !anyMove(grid, pool);
+    // track, since it must be used immediately to reopen the board. It is only
+    // ever earned by jamming your opponent, so there are no bombs in a solo run.
+    const noSharedMove = bombsMode && myTurn && !soloPlayer && !anyMove(grid, pool);
     const canBomb = noSharedMove;
 
     const displayRemaining = (p) => {
@@ -474,9 +475,12 @@
         // first timeout in bombs mode: `turn` is the player who ran out
         if (room.scores[turn] < room.scores[other]) {
           ref.update({ status: 'over', gameOver: { winner: other, reason: 'time', scores: room.scores } });
+        } else if (!anyMove(grid, pool)) {
+          // they're ahead, but the board is already jammed and there are no
+          // bombs in a solo run — the comeback can't even start, so they win.
+          ref.update({ status: 'over', gameOver: { winner: turn, reason: 'stuck', scores: room.scores } });
         } else {
           // they're ahead (or tied) — opponent gets a solo run to overtake.
-          // A jammed soloist can always bomb open, so there's always a way on.
           ref.update({
             solo: other,
             turn: other,
@@ -768,8 +772,12 @@
         if (reachedTarget || nextScores[meP] > nextScores[leader]) {
           upd.status = 'over';
           upd.gameOver = { winner: meP, reason: reachedTarget ? 'target' : 'comeback', scores: nextScores };
+        } else if (!anyMove(boardAfter, withShapes(nextPool))) {
+          // No opponent to jam in a solo run → no bomb. Getting stuck ends it.
+          upd.status = 'over';
+          upd.gameOver = { winner: leader, reason: 'stuck', scores: nextScores };
         } else {
-          startTurn(meP);                       // keep going solo (bomb open if jammed)
+          startTurn(meP);                       // keep going solo
         }
         finish();
         return;
@@ -1240,6 +1248,7 @@
                 {gameOver.reason === 'time' && `${room.names[gameOver.winner === 1 ? 2 : 1]} ran out of time.`}
                 {gameOver.reason === 'nomove' && `${room.names[gameOver.winner === 1 ? 2 : 1]} had no legal move left.`}
                 {gameOver.reason === 'comeback' && `${room.names[gameOver.winner]} overtook the score on a solo run.`}
+                {gameOver.reason === 'stuck' && `${room.names[gameOver.winner === 1 ? 2 : 1]} got stuck with no moves left.`}
               </div>
               <div style={{ ...display, fontSize: 19, fontWeight: 700, marginBottom: 16, fontVariantNumeric: 'tabular-nums' }}>
                 <span style={{ color: THEME[1].flat }}>{(gameOver.scores || room.scores)[1]}</span>
