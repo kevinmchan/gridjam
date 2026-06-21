@@ -520,7 +520,7 @@
       }
     }, [lastMove && lastMove.key]);
 
-    // Arming sting the moment you find yourself jammed and need to detonate.
+    // Arming sting the moment you earn a bomb (jammed your opponent) and must detonate.
     useEffect(() => {
       if (noSharedMove) Sound.block();
     }, [noSharedMove]);
@@ -798,9 +798,14 @@
       }
 
       // ----- BOMBS MODE turn resolution -----
-      // The turn always passes. If the board is now jammed, the opponent simply
-      // finds no shared move on their turn and detonates a bomb to reopen it.
-      startTurn(other);
+      if (opponentCanShared) {
+        startTurn(other);
+      } else {
+        // meP forced the jam → they've earned a bomb as a reward. The board is
+        // blocked, so they keep the turn and must detonate immediately to
+        // reopen it, then play passes on as normal.
+        startTurn(meP);
+      }
       finish();
     }
     attemptRef.current = attemptPlace;
@@ -889,7 +894,7 @@
             <div style={{ fontSize: 12, opacity: 0.65, marginTop: 9, lineHeight: 1.5 }}>
               {mode === 'classic'
                 ? 'Take turns placing shared blocks. Block your opponent — leave them no move — and you win instantly.'
-                : "Blocking no longer ends the game. When it's your turn and no shared block fits, you get a 💣 — drag it onto the board to blast a 5×5 hole and keep playing. When a clock runs out, the leader wins — unless the player behind is the one with time left, who can keep playing solo to catch up."}
+                : "Block your opponent — leave them no move — and instead of winning you're rewarded with a 💣: you keep your turn, drag it onto the board to blast a 5×5 hole, then play passes on. When a clock runs out, the leader wins — unless the player behind is the one with time left, who can keep playing solo to catch up."}
             </div>
           </div>
           <div style={{ ...card, padding: 14, marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1048,7 +1053,7 @@
     else if (drag) bannerText = previewValid
       ? (previewBomb ? 'Release to detonate 💥' : 'Release to drop ✓')
       : (previewBomb ? 'Off the board — keep moving' : 'No room there — keep moving');
-    else if (noSharedMove) bannerText = '🚫 Jammed — drag your 💣 to blast it open';
+    else if (noSharedMove) bannerText = '💥 Bomb earned — drag your 💣 to blast the board open';
     else if (soloPlayer) bannerText = `Solo run — pass ${room.scores[soloOpp]} pts before time runs out!`;
     else bannerText = 'Your turn — drag a block';
 
