@@ -450,13 +450,24 @@
         if (myPlayer) { finish(); return; }           // re-attaching after refresh
         if (v.players && v.players[2]) { setErr('That game is already full.'); return; }
         myPlayer = 2;
+        // Don't start play yet — hand control to the host so they aren't
+        // caught off guard. The clock starts when they press Start.
         const upd = {
           'players/2': clientId.current,
-          status: 'playing',
-          'clock/turnStartedAt': ServerValue.TIMESTAMP,
+          status: 'ready',
         };
         upd['names/2'] = joinName.trim() || 'Player 2';
         ref.update(upd).then(finish);
+      });
+    }
+
+    // Host kicks off play once the opponent has joined.
+    function startGame() {
+      Sound.unlock();
+      db.ref('games/' + me.roomCode).update({
+        status: 'playing',
+        turn: 1,
+        'clock/turnStartedAt': ServerValue.TIMESTAMP,
       });
     }
 
@@ -747,10 +758,47 @@
             </div>
             <div style={{ fontSize: 13.5, opacity: 0.7, marginTop: 16, lineHeight: 1.5 }}>
               Have your opponent scan the code or open the link — they'll drop straight into the
-              join screen. The game starts the moment they're in.
+              join screen. You'll start the game once they've joined.
             </div>
           </div>
           <button onClick={leaveGame} style={{ ...ghostBtn, width: '100%' }}>Cancel</button>
+        </Shell>
+      );
+    }
+
+    if (status === 'ready') {
+      const iHost = me.player === 1;
+      return (
+        <Shell>
+          <Title sub={iHost ? 'ready to start' : 'waiting room'} />
+          <div style={{ ...card, padding: 24, textAlign: 'center', marginBottom: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 24, marginBottom: 18 }}>
+              {[1, 2].map((p) => (
+                <div key={p} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 7 }}>
+                  <span style={{ width: 38, height: 38, borderRadius: 10, background: THEME[p].solid }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 800, maxWidth: 110, overflow: 'hidden',
+                    textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{room.names[p]}</span>
+                  <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.04em',
+                    color: THEME[p].flat }}>{p === 1 ? 'HOST' : 'JOINED ✓'}</span>
+                </div>
+              ))}
+            </div>
+            {iHost ? (
+              <>
+                <div style={{ fontSize: 14, opacity: 0.78, marginBottom: 18, lineHeight: 1.5 }}>
+                  <strong>{room.names[2]}</strong> is in. Start whenever you're ready —
+                  your clock begins on your first turn.
+                </div>
+                <button onClick={startGame} style={primaryBtn(true)}>Start game</button>
+              </>
+            ) : (
+              <div style={{ fontSize: 15, opacity: 0.82, lineHeight: 1.5, padding: '4px 0',
+                animation: 'gl-pulse-soft 1.6s ease-in-out infinite' }}>
+                You're in! Waiting for <strong>{room.names[1]}</strong> to start the game…
+              </div>
+            )}
+          </div>
+          <button onClick={leaveGame} style={{ ...ghostBtn, width: '100%' }}>Leave</button>
         </Shell>
       );
     }
@@ -1058,6 +1106,7 @@
     @keyframes gl-rise { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
     @keyframes gl-score { 0%{opacity:0;transform:translateY(6px) scale(0.8);} 20%{opacity:1;transform:translateY(0) scale(1.05);} 75%{opacity:1;} 100%{opacity:0;transform:translateY(-20px) scale(1);} }
     @keyframes gl-flash { 0%{opacity:0;transform:scale(0.55);} 25%{opacity:0.95;transform:scale(1);} 100%{opacity:0;transform:scale(1.08);} }
+    @keyframes gl-pulse-soft { 0%,100%{opacity:0.55;} 50%{opacity:1;} }
     * { -webkit-tap-highlight-color: transparent; }
     code { background:#f1e7cf; padding:1px 5px; border-radius:5px; font-size:0.92em; }
   `;
