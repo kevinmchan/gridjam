@@ -815,7 +815,13 @@
               {[['classic', 'Classic'], ['bombs', 'Bombs']].map(([m, label]) => {
                 const on = mode === m;
                 return (
-                  <button key={m} onClick={() => setMode(m)} style={{
+                  <button key={m} onClick={() => {
+                    if (m === mode) return;
+                    setMode(m);
+                    // each mode carries its own sensible defaults (still adjustable below)
+                    if (m === 'bombs') { setMins({ 1: 2, 2: 2 }); setTarget(10); }
+                    else { setMins({ 1: 5, 2: 5 }); setTarget(20); }
+                  }} style={{
                     flex: 1, padding: '10px', borderRadius: 11, cursor: 'pointer', fontFamily: "'Fraunces', serif",
                     fontSize: 15, fontWeight: 700, transition: 'all .15s ease',
                     border: on ? `2px solid ${THEME[1].flat}` : '1px solid #d8c49a',
