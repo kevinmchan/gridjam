@@ -2,8 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Gridlock — online block duel</title>
+
+  <!-- PWA: installable / add-to-home-screen support -->
+  <meta name="description" content="A shared-grid block duel you play with someone on another device. Create a game, share the code, take turns placing blocks and clearing lines." />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#cf5f2c" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png" />
+  <!-- iOS home-screen / standalone -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Gridlock" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+
   <style>
     html, body { height: 100%; margin: 0; }
     #root { min-height: 100%; }
@@ -12,6 +26,31 @@
       padding-top: 38vh; font-size: 18px; letter-spacing: 0.05em; line-height: 1.5;
       padding-left: 24px; padding-right: 24px; }
   </style>
+
+  <script>
+  /* PWA plumbing — runs early so we don't miss the install event.
+     - Capture `beforeinstallprompt` (Chrome/Edge/Android) so the landing-page
+       nudge can trigger the real installer on demand instead of the browser's
+       default mini-infobar.
+     - Register the service worker for offline support + installability. */
+  (function () {
+    window.__deferredInstallPrompt = null;
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      window.__deferredInstallPrompt = e;
+      window.dispatchEvent(new Event('gl-installable'));
+    });
+    window.addEventListener('appinstalled', function () {
+      window.__deferredInstallPrompt = null;
+      window.dispatchEvent(new Event('gl-installed'));
+    });
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').catch(function () {});
+      });
+    }
+  })();
+  </script>
 </head>
 <body>
   <div id="root"><div id="loading">Loading Gridlock…</div></div>
@@ -816,6 +855,7 @@
       return (
         <Shell>
           <Title />
+          <InstallPrompt />
           <div style={{ ...card, padding: 16, marginBottom: 14, fontSize: 13.5, lineHeight: 1.55 }}>
             Play the shared-grid block duel with someone on another device. One of you
             <strong> creates a game</strong> and shares the 4-letter code; the other
@@ -1282,6 +1322,107 @@
       </div>
     );
   }
+  /* Landing-page nudge to install the game to the Home Screen.
+     - Chrome/Edge/Android: a tap fires the real install prompt (captured as
+       `beforeinstallprompt` before mount).
+     - iOS Safari: no programmatic install exists, so show the Share → "Add to
+       Home Screen" steps instead.
+     - Hidden entirely once installed/running standalone, or after dismissal. */
+  function isStandalone() {
+    return (typeof window !== 'undefined') && (
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+      window.navigator.standalone === true ||
+      (document.referrer || '').indexOf('android-app://') === 0
+    );
+  }
+  function isIOSDevice() {
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    return /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPadOS
+  }
+  const A2HS_DISMISS_KEY = 'gl_a2hs_dismissed';
+
+  function InstallPrompt() {
+    const [dismissed, setDismissed] = useState(() => {
+      try { return localStorage.getItem(A2HS_DISMISS_KEY) === '1'; } catch (e) { return false; }
+    });
+    const [installable, setInstallable] = useState(() =>
+      typeof window !== 'undefined' && !!window.__deferredInstallPrompt);
+    const [installed, setInstalled] = useState(false);
+
+    useEffect(() => {
+      const onInstallable = () => setInstallable(true);
+      const onInstalled = () => setInstalled(true);
+      window.addEventListener('gl-installable', onInstallable);
+      window.addEventListener('gl-installed', onInstalled);
+      return () => {
+        window.removeEventListener('gl-installable', onInstallable);
+        window.removeEventListener('gl-installed', onInstalled);
+      };
+    }, []);
+
+    if (installed || dismissed || isStandalone()) return null;
+    const ios = isIOSDevice();
+    if (!installable && !ios) return null; // nothing useful to offer here
+
+    const dismiss = () => {
+      try { localStorage.setItem(A2HS_DISMISS_KEY, '1'); } catch (e) {}
+      setDismissed(true);
+    };
+    const install = async () => {
+      const e = window.__deferredInstallPrompt;
+      if (!e) return;
+      try { e.prompt(); await e.userChoice; } catch (err) {}
+      window.__deferredInstallPrompt = null;
+      setInstallable(false);
+    };
+
+    const wrap = { ...card, position: 'relative', padding: '13px 14px', marginBottom: 14,
+      background: 'linear-gradient(150deg,#fff6e6,#fdeccf)', border: '1px solid #eccb8f',
+      display: 'flex', alignItems: 'center', gap: 12, animation: 'gl-rise .5s ease' };
+    const closeBtn = { position: 'absolute', top: 6, right: 8, border: 'none', background: 'transparent',
+      color: '#b39a6a', fontSize: 18, lineHeight: 1, cursor: 'pointer', padding: 4 };
+    const headline = { fontFamily: "'Fraunces', serif", fontSize: 15, fontWeight: 700, color: '#7a2e16' };
+
+    return (
+      <div style={wrap}>
+        <button onClick={dismiss} aria-label="Dismiss" style={closeBtn}>×</button>
+        <div style={{ width: 38, height: 38, flexShrink: 0, borderRadius: 9, overflow: 'hidden',
+          boxShadow: '0 2px 6px rgba(120,90,40,0.25)' }}>
+          <img src="icons/icon-192.png" alt="" width="38" height="38" style={{ display: 'block' }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0, paddingRight: 14 }}>
+          <div style={headline}>Add Gridlock to your Home Screen</div>
+          {installable ? (
+            <div style={{ fontSize: 12.5, opacity: 0.75, marginTop: 2, lineHeight: 1.4 }}>
+              Install it for one-tap, full-screen play — no browser bar.
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, opacity: 0.8, marginTop: 3, lineHeight: 1.45 }}>
+              Tap the Share icon <span aria-hidden="true" style={{
+                display: 'inline-block', transform: 'translateY(2px)' }}>
+                <svg width="13" height="15" viewBox="0 0 13 15" fill="none" style={{ verticalAlign: 'middle' }}>
+                  <path d="M6.5 1.2 L6.5 9.2 M3.6 4 L6.5 1 L9.4 4" stroke="#1a8f7d" strokeWidth="1.3"
+                    strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M2.4 6.4 H1.2 V13.6 H11.8 V6.4 H10.6" stroke="#1a8f7d" strokeWidth="1.3"
+                    strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>, then <strong>Add to Home Screen</strong>.
+            </div>
+          )}
+          {installable && (
+            <button onClick={install} style={{ marginTop: 8, padding: '8px 16px', borderRadius: 10,
+              border: 'none', fontFamily: "'Fraunces', serif", fontSize: 14, fontWeight: 700, color: '#fff',
+              cursor: 'pointer', background: 'linear-gradient(150deg,#e88a4a,#cf5f2c)',
+              boxShadow: '0 3px 0 rgba(140,80,30,0.35)' }}>
+              Add to Home Screen
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   function Stepper({ value, onChange }) {
     const btn = { width: 32, height: 32, borderRadius: 9, border: '1px solid #e2cfa3', background: '#f1e7cf',
       fontSize: 18, fontWeight: 800, color: '#3a3025', cursor: 'pointer', lineHeight: 1 };
