@@ -150,7 +150,7 @@
      before audio can start, so unlock() is called from button taps and
      the first drag; after that, moves arriving over Firebase can play. */
   const Sound = (function () {
-    let ctx = null;
+    let ctx = null, bus = null;
     let muted = false;
     try { muted = localStorage.getItem('gl_muted') === '1'; } catch (e) {}
 
@@ -160,25 +160,55 @@
         const AC = window.AudioContext || window.webkitAudioContext;
         if (!AC) return null;
         try { ctx = new AC(); } catch (e) { return null; }
+        bus = ctx.createGain(); bus.gain.value = 0.85;
+        try {                                   // gentle glue compressor so layers stay punchy
+          const comp = ctx.createDynamicsCompressor();
+          bus.connect(comp); comp.connect(ctx.destination);
+        } catch (e) { bus.connect(ctx.destination); }
       }
       if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
       return ctx;
     }
-    // One enveloped oscillator. Optional pitch glide to `slideTo`.
-    function tone(freq, dur, type, gain, delay, slideTo) {
-      const c = ac(); if (!c) return;
-      const t0 = c.currentTime + (delay || 0);
-      const osc = c.createOscillator();
-      const g = c.createGain();
+    // One enveloped oscillator voice (attack + exponential decay).
+    function voice(freq, dur, type, gain, delay, slideTo, attack) {
+      const c = ctx, t0 = c.currentTime + (delay || 0);
+      const osc = c.createOscillator(), g = c.createGain();
       osc.type = type || 'sine';
       osc.frequency.setValueAtTime(freq, t0);
       if (slideTo) { try { osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur); } catch (e) {} }
       g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain || 0.2), t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t0 + (attack || 0.008));
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-      osc.connect(g); g.connect(c.destination);
+      osc.connect(g); g.connect(bus);
       osc.start(t0); osc.stop(t0 + dur + 0.03);
     }
+    // Warm bell = fundamental + octave + an inharmonic shimmer partial.
+    function bell(freq, dur, gain, delay) {
+      voice(freq, dur, 'triangle', gain, delay, 0, 0.006);
+      voice(freq * 2, dur * 0.6, 'sine', gain * 0.35, delay, 0, 0.006);
+      voice(freq * 3.01, dur * 0.35, 'sine', gain * 0.12, delay, 0, 0.004);
+    }
+    // Filtered white-noise burst for impact/explosions.
+    function noise(dur, gain, delay, fromHz, toHz) {
+      const c = ctx, t0 = c.currentTime + (delay || 0);
+      const len = Math.max(1, Math.floor(c.sampleRate * dur));
+      const buf = c.createBuffer(1, len, c.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      const src = c.createBufferSource(); src.buffer = buf;
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(fromHz || 1400, t0);
+      lp.frequency.exponentialRampToValueAtTime(toHz || 120, t0 + dur);
+      const g = c.createGain();
+      g.gain.setValueAtTime(gain, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(lp); lp.connect(g); g.connect(bus);
+      src.start(t0); src.stop(t0 + dur);
+    }
+
+    const PENT = [523.25, 587.33, 659.25, 783.99, 880.0, 1046.5];   // C-major pentatonic
+    const MAJ = [523.25, 659.25, 783.99, 1046.5, 1318.5, 1568.0, 2093.0];
+
     return {
       isMuted: () => muted,
       unlock() { if (!muted) ac(); },
@@ -188,45 +218,49 @@
         if (!muted) ac();
         return muted;
       },
-      // A soft wooden "thock" when a block lands.
+      // Bright, musical "plip" — pitch from a pentatonic scale, so a run of
+      // moves sounds like a little melody instead of a repeated click.
       place() {
-        if (muted) return;
-        tone(200, 0.09, 'triangle', 0.20, 0, 150);
-        tone(360, 0.06, 'sine', 0.08, 0.015);
+        if (muted || !ac()) return;
+        const f = PENT[Math.floor(Math.random() * PENT.length)];
+        bell(f, 0.24, 0.22, 0);
+        voice(f / 2, 0.12, 'sine', 0.07, 0, 0, 0.004);    // soft sub thump
       },
-      // Rising arpeggio that grows with the number of lines cleared.
+      // Triumphant ascending arpeggio + a sparkle tail; grows with combo size.
       clear(lines) {
-        if (muted) return;
-        const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5, 1568.0];
-        const steps = Math.max(2, Math.min(lines + 1, notes.length));
-        for (let i = 0; i < steps; i++) {
-          tone(notes[i], 0.20, 'triangle', 0.16, i * 0.06);
-          tone(notes[i] * 2, 0.16, 'sine', 0.05, i * 0.06);
-        }
+        if (muted || !ac()) return;
+        const steps = Math.max(2, Math.min(2 + lines, MAJ.length));
+        for (let i = 0; i < steps; i++) bell(MAJ[i], 0.32, 0.18, i * 0.05);
+        const tail = steps * 0.05;
+        for (let i = 0; i < 5; i++)
+          voice(1568 * Math.pow(2, i / 7), 0.12, 'triangle', 0.06, tail + i * 0.035, 0, 0.004);
       },
-      // Low buzz when a block is dropped somewhere it can't fit.
+      // Soft "nope" when a block can't fit.
       invalid() {
-        if (muted) return;
-        tone(150, 0.16, 'sawtooth', 0.12, 0, 80);
+        if (muted || !ac()) return;
+        voice(180, 0.14, 'sawtooth', 0.10, 0, 90, 0.01);
+        voice(120, 0.16, 'square', 0.06, 0.02, 70, 0.01);
       },
-      // Short victory flourish at game over.
-      win() {
-        if (muted) return;
-        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) =>
-          tone(f, 0.32, 'triangle', 0.20, i * 0.12));
-      },
-      // Deep boom plus a little sparkle when a bomb detonates.
+      // Deep boom + impact noise + a rising reward sparkle.
       bomb() {
-        if (muted) return;
-        tone(90, 0.30, 'sawtooth', 0.24, 0, 38);
-        tone(150, 0.22, 'square', 0.10, 0.02, 60);
-        [880, 1100, 1320].forEach((f, i) => tone(f, 0.12, 'triangle', 0.07, 0.07 + i * 0.04));
+        if (muted || !ac()) return;
+        noise(0.38, 0.5, 0, 1600, 90);
+        voice(120, 0.42, 'sine', 0.32, 0, 38, 0.005);
+        voice(80, 0.34, 'triangle', 0.18, 0, 30, 0.005);
+        [784, 988, 1175, 1568, 1976].forEach((f, i) => bell(f, 0.22, 0.10, 0.12 + i * 0.04));
       },
-      // Two-note "denied" sting when you get blocked and handed a bomb.
+      // Bright arming sting — you were blocked, but you got a bomb!
       block() {
-        if (muted) return;
-        tone(392, 0.10, 'square', 0.12, 0);
-        tone(261.63, 0.16, 'square', 0.12, 0.09);
+        if (muted || !ac()) return;
+        voice(330, 0.10, 'square', 0.10, 0);
+        voice(440, 0.12, 'square', 0.10, 0.08);
+        bell(880, 0.2, 0.08, 0.16);
+      },
+      // Full fanfare at game over: arpeggio into a held major chord.
+      win() {
+        if (muted || !ac()) return;
+        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => bell(f, 0.4, 0.2, i * 0.11));
+        [523.25, 659.25, 783.99, 1046.5].forEach((f) => bell(f, 0.9, 0.11, 0.5));
       },
     };
   })();
@@ -1031,8 +1065,10 @@
                 }}>
                   {room.lastMove && room.lastMove.player === p && room.lastMove.text && (
                     <div key={room.lastMove.key} style={{
-                      position: 'absolute', right: 10, top: 30, ...display, fontSize: 17, fontWeight: 700,
-                      color: THEME[p].flat, animation: 'gl-score 1.15s ease forwards', pointerEvents: 'none',
+                      position: 'absolute', right: 10, top: 26, ...display, fontWeight: 800,
+                      fontSize: 18 + Math.min(room.lastMove.pts || 0, 14),
+                      color: THEME[p].flat, textShadow: `0 2px 10px ${THEME[p].soft}, 0 0 1px ${THEME[p].flat}`,
+                      animation: 'gl-score 1.2s cubic-bezier(.2,1.4,.4,1) forwards', pointerEvents: 'none', zIndex: 3,
                     }}>{room.lastMove.text}</div>
                   )}
                   {bombsMode && room.lastMove && room.lastMove.blocked === p && (
@@ -1078,7 +1114,8 @@
           </div>
 
           {/* board */}
-          <div style={{ ...card, padding: 8, marginBottom: 8, touchAction: 'none' }}>
+          <div style={{ ...card, padding: 8, marginBottom: 8, touchAction: 'none',
+            animation: flash ? (flash.bomb ? 'gl-shake .5s ease' : 'gl-bump .4s ease') : 'none' }}>
             <div ref={gridRef} style={{ display: 'grid', gridTemplateColumns: `repeat(${SIZE}, 1fr)`, gap: 4 }}>
               {grid.map((row, r) => row.map((val, c) => {
                 const key = `${r},${c}`;
@@ -1184,7 +1221,8 @@
             alignItems: 'center', justifyContent: 'center', padding: 24 }}>
             <div style={{ ...card, padding: 28, textAlign: 'center', maxWidth: 320, animation: 'gl-rise .35s ease' }}>
               <div style={{ fontSize: 13, fontWeight: 800, opacity: 0.6, letterSpacing: '0.1em' }}>WINNER</div>
-              <div style={{ ...display, fontSize: 32, fontWeight: 700, margin: '6px 0 4px', color: THEME[gameOver.winner].flat }}>
+              <div style={{ ...display, fontSize: 32, fontWeight: 700, margin: '6px 0 4px', color: THEME[gameOver.winner].flat,
+                animation: 'gl-spin-in .5s cubic-bezier(.2,1.4,.4,1) both' }}>
                 {room.names[gameOver.winner]}
               </div>
               <div style={{ fontSize: 13.5, opacity: 0.75, marginBottom: 14 }}>
@@ -1322,12 +1360,15 @@
 
   const css = `
     @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Nunito+Sans:wght@400;600;700;800&display=swap');
-    @keyframes gl-pop { 0%{transform:scale(0.45);} 70%{transform:scale(1.08);} 100%{transform:scale(1);} }
+    @keyframes gl-pop { 0%{transform:scale(0.2);filter:brightness(2);} 50%{transform:scale(1.22);filter:brightness(1.4);} 72%{transform:scale(0.9);} 86%{transform:scale(1.05);} 100%{transform:scale(1);filter:brightness(1);} }
     @keyframes gl-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(208,72,60,0.55);} 50%{box-shadow:0 0 0 7px rgba(208,72,60,0);} }
     @keyframes gl-rise { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
-    @keyframes gl-score { 0%{opacity:0;transform:translateY(6px) scale(0.8);} 20%{opacity:1;transform:translateY(0) scale(1.05);} 75%{opacity:1;} 100%{opacity:0;transform:translateY(-20px) scale(1);} }
-    @keyframes gl-flash { 0%{opacity:0;transform:scale(0.55);} 25%{opacity:0.95;transform:scale(1);} 100%{opacity:0;transform:scale(1.08);} }
+    @keyframes gl-score { 0%{opacity:0;transform:translateY(10px) scale(0.4) rotate(-8deg);} 22%{opacity:1;transform:translateY(-3px) scale(1.35) rotate(4deg);} 40%{transform:translateY(-5px) scale(1.05) rotate(0deg);} 72%{opacity:1;} 100%{opacity:0;transform:translateY(-30px) scale(1.05);} }
+    @keyframes gl-flash { 0%{opacity:0;transform:scale(0.3);} 18%{opacity:1;transform:scale(1.18);} 55%{opacity:0.85;transform:scale(1);} 100%{opacity:0;transform:scale(1.3);} }
     @keyframes gl-pulse-soft { 0%,100%{opacity:0.55;} 50%{opacity:1;} }
+    @keyframes gl-bump { 0%{transform:scale(1);} 30%{transform:scale(1.035);} 60%{transform:scale(0.992);} 100%{transform:scale(1);} }
+    @keyframes gl-shake { 0%,100%{transform:translate(0,0) rotate(0);} 12%{transform:translate(-6px,2px) rotate(-0.8deg);} 26%{transform:translate(6px,-2px) rotate(0.8deg);} 42%{transform:translate(-5px,1px);} 58%{transform:translate(5px,-1px);} 74%{transform:translate(-3px,1px);} 88%{transform:translate(2px,0);} }
+    @keyframes gl-spin-in { 0%{opacity:0;transform:scale(0.5) rotate(-12deg);} 60%{transform:scale(1.12) rotate(4deg);} 100%{opacity:1;transform:scale(1) rotate(0);} }
     * { -webkit-tap-highlight-color: transparent; }
     code { background:#f1e7cf; padding:1px 5px; border-radius:5px; font-size:0.92em; }
   `;
