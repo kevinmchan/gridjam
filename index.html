@@ -170,6 +170,17 @@
   function saveMe(m) { try { localStorage.setItem('gl_me', JSON.stringify(m)); } catch (e) {} }
   function clearMe() { try { localStorage.removeItem('gl_me'); } catch (e) {} }
 
+  // ?code=ABCD in the URL (from a shared link / QR scan) pre-fills the join screen.
+  function urlCode() {
+    try {
+      const c = new URLSearchParams(window.location.search).get('code');
+      return c ? c.trim().toUpperCase().slice(0, 4) : '';
+    } catch (e) { return ''; }
+  }
+  function inviteUrl(code) {
+    return window.location.origin + window.location.pathname + '?code=' + code;
+  }
+
   const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const randCode = () => Array.from({ length: 4 }, () =>
     CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
@@ -184,7 +195,7 @@
 
     const [me, setMe] = useState(loadMe);     // { roomCode, player } | null
     const [room, setRoom] = useState(null);   // synced snapshot | null
-    const [view, setView] = useState(() => (loadMe() ? 'game' : 'home'));
+    const [view, setView] = useState(() => (loadMe() ? 'game' : (urlCode() ? 'join' : 'home')));
     const [err, setErr] = useState('');
 
     // create form
@@ -192,7 +203,8 @@
     const [mins, setMins] = useState({ 1: 5, 2: 5 });
     const [target, setTarget] = useState(20);
     // join form
-    const [joinCode, setJoinCode] = useState('');
+    const [joinCode, setJoinCode] = useState(urlCode);
+    const [linkCopied, setLinkCopied] = useState(false);
     const [joinName, setJoinName] = useState('');
 
     // drag state (mirrored into a ref for window listeners)
@@ -334,6 +346,19 @@
 
     function leaveGame() {
       clearMe(); setMe(null); setRoom(null); setDrag(null); setView('home'); setErr('');
+    }
+
+    function shareInvite(code) {
+      const url = inviteUrl(code);
+      if (navigator.share) {
+        navigator.share({ title: 'Gridlock', text: 'Join my Gridlock game', url }).catch(() => {});
+        return;
+      }
+      try {
+        navigator.clipboard.writeText(url);
+        setLinkCopied(true);
+        setTimeout(() => setLinkCopied(false), 1800);
+      } catch (e) {}
     }
 
     function playAgain() {
@@ -560,14 +585,26 @@
         <Shell>
           <Title sub="waiting room" />
           <div style={{ ...card, padding: 24, textAlign: 'center', marginBottom: 12 }}>
-            <div style={fieldLabel}>SHARE THIS CODE</div>
-            <div style={{ ...display, fontSize: 52, fontWeight: 700, letterSpacing: '0.18em', margin: '6px 0 4px', color: THEME[1].flat }}>
+            <div style={fieldLabel}>SCAN TO JOIN</div>
+            <div style={{ display: 'inline-flex', padding: 12, margin: '8px 0 4px', background: '#fff',
+              borderRadius: 14, border: '1px solid #e2cfa3', boxShadow: '0 4px 14px rgba(120,90,40,0.12)' }}>
+              <QRCode value={inviteUrl(me.roomCode)} size={172} />
+            </div>
+            <div style={{ ...fieldLabel, marginTop: 14 }}>OR SHARE THIS CODE</div>
+            <div style={{ ...display, fontSize: 46, fontWeight: 700, letterSpacing: '0.18em', margin: '4px 0 6px', color: THEME[1].flat }}>
               {me.roomCode}
             </div>
-            <button onClick={() => { try { navigator.clipboard.writeText(me.roomCode); } catch (e) {} }}
-              style={{ ...ghostBtn, display: 'inline-block', padding: '7px 16px', flex: 'none' }}>Copy code</button>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button onClick={() => { try { navigator.clipboard.writeText(me.roomCode); } catch (e) {} }}
+                style={{ ...ghostBtn, display: 'inline-block', padding: '7px 16px', flex: 'none' }}>Copy code</button>
+              <button onClick={() => shareInvite(me.roomCode)}
+                style={{ ...ghostBtn, display: 'inline-block', padding: '7px 16px', flex: 'none' }}>
+                {linkCopied ? 'Link copied ✓' : (navigator.share ? 'Share link' : 'Copy link')}
+              </button>
+            </div>
             <div style={{ fontSize: 13.5, opacity: 0.7, marginTop: 16, lineHeight: 1.5 }}>
-              Waiting for your opponent to join… the game starts the moment they enter the code.
+              Have your opponent scan the code or open the link — they'll drop straight into the
+              join screen. The game starts the moment they're in.
             </div>
           </div>
           <button onClick={leaveGame} style={{ ...ghostBtn, width: '100%' }}>Cancel</button>
@@ -811,6 +848,54 @@
     );
   }
 
+  /* Renders a QR code as an SVG from the qrcode-generator lib (loaded from CDN).
+     Returns null gracefully if the lib hasn't loaded — the code + link still work. */
+  function QRCode({ value, size }) {
+    size = size || 172;
+    const [ready, setReady] = useState(() => typeof window !== 'undefined' && !!window.qrcode);
+    useEffect(() => {
+      if (ready) return;
+      let n = 0;
+      const t = setInterval(() => {
+        if (window.qrcode) { setReady(true); clearInterval(t); }
+        else if (++n > 50) clearInterval(t);
+      }, 100);
+      return () => clearInterval(t);
+    }, [ready]);
+
+    if (!ready || !window.qrcode) {
+      return <div style={{ width: size, height: size, display: 'flex', alignItems: 'center',
+        justifyContent: 'center', fontSize: 12, color: '#9a8a66' }}>Loading QR…</div>;
+    }
+    let qr;
+    try {
+      qr = window.qrcode(0, 'M');   // type 0 = auto-size, error-correction level M
+      qr.addData(value);
+      qr.make();
+    } catch (e) { return null; }
+
+    const count = qr.getModuleCount();
+    const margin = 2;
+    const total = count + margin * 2;
+    const cell = size / total;
+    const rects = [];
+    for (let r = 0; r < count; r++) {
+      for (let c = 0; c < count; c++) {
+        if (qr.isDark(r, c)) {
+          rects.push(<rect key={r + '_' + c} x={(c + margin) * cell} y={(r + margin) * cell}
+            width={cell + 0.6} height={cell + 0.6} />);
+        }
+      }
+    }
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} shapeRendering="crispEdges"
+        role="img" aria-label="QR code to join the game">
+        <rect width={size} height={size} fill="#ffffff" />
+        <g fill="#2f2a20">{rects}</g>
+      </svg>
+    );
+  }
+
   const css = `
     @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Nunito+Sans:wght@400;600;700;800&display=swap');
     @keyframes gl-pop { 0%{transform:scale(0.45);} 70%{transform:scale(1.08);} 100%{transform:scale(1);} }
@@ -868,6 +953,12 @@
       document.getElementById('loading').textContent =
         'Could not load the game engine. This needs an internet connection — check it and reload.';
     }
+    // QR-code generator — loaded independently; if it fails the lobby just
+    // falls back to the code + invite link, so its failure must not abort the app.
+    loadOne([
+      'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js',
+      'https://unpkg.com/qrcode-generator@1.4.4/qrcode.js'
+    ], function () {}, function () {});
     chain([
       ['https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',
        'https://unpkg.com/react@18.2.0/umd/react.production.min.js'],
